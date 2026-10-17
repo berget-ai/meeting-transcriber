@@ -1,6 +1,6 @@
 {
   "name": "meeting-transcriber",
-  "version": "0.0.1-rc.6",
+  "version": "0.0.1-rc.7",
   "private": true,
   "description": "MatrixRTC-LiveKit participant that streams meeting audio to Berget realtime transcription and posts transcripts to the room"
 }
