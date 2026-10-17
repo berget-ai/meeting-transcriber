@@ -21,9 +21,16 @@ class Matrixing:
         self.client = AsyncClient(cfg.homeserver)
         self.client.access_token = cfg.access_token
         self.client.user_id = cfg.user_id
-        self._http = aiohttp.ClientSession(
-            headers={"Authorization": f"Bearer {cfg.access_token}"}
-        )
+        # ClientSession is created lazily: it must exist inside a running
+        # event loop, so __init__ (called synchronously) cannot own it.
+        self._http: aiohttp.ClientSession | None = None
+
+    async def _session(self) -> aiohttp.ClientSession:
+        if self._http is None or self._http.closed:
+            self._http = aiohttp.ClientSession(
+                headers={"Authorization": f"Bearer {self.cfg.access_token}"}
+            )
+        return self._http
 
     async def sync_forever(self) -> None:
         self.client.add_invite_callback = None  # polling model; no callbacks
@@ -58,8 +65,9 @@ class Matrixing:
 
     async def active_rtc_sessions(self, room_id: str) -> list[dict[str, Any]]:
         """Return the msc3401 call.member event content list, or [] when no call."""
+        http = await self._session()
         url = f"{self.cfg.homeserver}/_matrix/client/v3/rooms/{room_id}/state/{MSC3401_MEMBER}"
-        async with self._http.get(url) as resp:
+        async with http.get(url) as resp:
             if resp.status != 200:
                 return []
             data = await resp.json()
@@ -68,8 +76,9 @@ class Matrixing:
         return []
 
     async def openid_token(self) -> dict[str, Any]:
+        http = await self._session()
         url = f"{self.cfg.homeserver}/_matrix/client/v3/user/{self.cfg.user_id}/openid/request_token"
-        async with self._http.post(url, json={}) as resp:
+        async with http.post(url, json={}) as resp:
             resp.raise_for_status()
             return await resp.json()
 
