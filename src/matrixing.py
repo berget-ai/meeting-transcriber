@@ -7,6 +7,7 @@ from typing import Any
 
 import aiohttp
 from nio import AsyncClient
+from nio.responses import RoomSendError
 
 from .config import Config
 
@@ -115,12 +116,37 @@ class Matrixing:
             resp.raise_for_status()
             return await resp.json()
 
-    async def post_message(self, room_id: str, body: str) -> None:
-        await self.client.room_send(
+    async def post_message(
+        self,
+        room_id: str,
+        body: str,
+        html: str | None = None,
+        thread_root: str | None = None,
+    ) -> str | None:
+        """Post a message (plain or HTML-formatted, optionally as thread reply).
+
+        Returns the new event id (transcript thread root). Element renders
+        `formatted_body` (org.matrix.custom.html) instead of `body` when given.
+        """
+        content: dict[str, Any] = {"msgtype": "m.text", "body": body}
+        if html:
+            content["format"] = "org.matrix.custom.html"
+            content["formatted_body"] = html
+        if thread_root:
+            content["m.relates_to"] = {
+                "rel_type": "m.thread",
+                "event_id": thread_root,
+                "m.in_reply_to": {"event_id": thread_root},
+            }
+        resp = await self.client.room_send(
             room_id,
             message_type="m.room.message",
-            content={"msgtype": "m.text", "body": body},
+            content=content,
         )
+        if isinstance(resp, RoomSendError):
+            log.warning("[%s] post failed: %s", room_id, resp)
+            return None
+        return getattr(resp, "event_id", None)
 
     async def display_name(self, room_id: str, user_id: str) -> str:
         try:

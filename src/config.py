@@ -27,12 +27,16 @@ class Config:
 
     # Berget realtime transcription.
     berget_api_key: str = os.environ["BERGET_API_KEY"]
+    berget_api_base: str = os.environ.get("BERGET_API_BASE", "https://api.berget.ai").rstrip("/")
     realtime_url: str = os.environ.get("REALTIME_URL", "wss://api.berget.ai/v1/realtime")
     model: str = os.environ.get("TRANSCRIPTION_MODEL", "klang/pianissimo")
     languages: list[str] = field(default_factory=lambda: _csv("TRANSCRIPTION_LANGUAGES") or ["sv"])
     chunk_seconds: int = int(os.environ.get("TRANSCRIPTION_CHUNK_SECONDS", "3"))
 
     post_to_room: bool = os.environ.get("POST_TRANSCRIPTS", "true").lower() != "false"
+    # End-of-call renskrivning (cleaned-up notes) via the LLM API.
+    post_summary: bool = os.environ.get("POST_SUMMARY", "true").lower() != "false"
+    summary_model: str = os.environ.get("SUMMARY_MODEL", "moonshotai/Kimi-K3")
     # How often we check MatrixRTC rooms for active sessions (seconds).
     poll_interval: int = int(os.environ.get("POLL_INTERVAL", "15"))
 

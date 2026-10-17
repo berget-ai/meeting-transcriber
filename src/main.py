@@ -2,20 +2,39 @@
 
 One CallTask per room with an active session; the task joins LiveKit, spawns
 one RealtimeSession per remote audio track (per speaker) and posts completed
-turns to the Matrix room from the bot account.
+turns to the Matrix room from the bot account — as HTML-formatted thread
+replies under a per-meeting root message. When the call ends the collected
+transcript is renskriven (cleaned up/summarised) via the Berget LLM API and
+posted in the same thread.
 """
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import time
+from dataclasses import dataclass, field
 
 from .config import config
 from .matrixing import Matrixing
 from .rtc import CallRoom, fetch_sfu_credentials
+from .summarize import summarize
 from .transcribe import RealtimeSession
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class CallContext:
+    """Shared per-call state between the call task and per-track tasks."""
+
+    room_id: str
+    thread_root: str | None = None
+    transcript: list[str] = field(default_factory=list)
+    started: float = field(default_factory=time.time)
+
+    def add(self, speaker: str, text: str) -> None:
+        self.transcript.append(f"{speaker}: {text}")
 
 
 class Bot:
@@ -56,15 +75,18 @@ class Bot:
 
     async def _call_task(self, room_id: str) -> None:
         call = CallRoom(room_id)
+        ctx = CallContext(room_id)
         track_tasks: dict[tuple[str, str], asyncio.Task] = {}
         try:
             openid = await self.matrix.openid_token()
             creds = await fetch_sfu_credentials(self.cfg.sfu_get_url, openid, room_id)
             await call.connect(creds["url"], creds["jwt"])
             if self.cfg.post_to_room:
-                await self.matrix.post_message(
-                    room_id, "📝 Transkribering aktiv — mötet transkriberas till Berget realtime."
+                banner = (
+                    "📝 Transkribering aktiv — mötet transkriberas till "
+                    "Berget realtime. Svar i den här tråden."
                 )
+                ctx.thread_root = await self.matrix.post_message(room_id, banner)
 
             empty_since: float | None = None
             while True:
@@ -84,7 +106,7 @@ class Bot:
                             room_id, track.sid, participant.identity, enc,
                         )
                         track_tasks[key] = asyncio.ensure_future(
-                            self._track_task(speaker, track, room_id)
+                            self._track_task(ctx, speaker, track)
                         )
 
                 # Leave when everyone else is gone for a while
@@ -104,16 +126,52 @@ class Bot:
             if track_tasks:
                 await asyncio.gather(*track_tasks.values(), return_exceptions=True)
             await call.close()
-            if self.cfg.post_to_room:
-                try:
-                    await self.matrix.post_message(room_id, "📝 Transkriberingen avslutad.")
-                except Exception:
-                    pass
+            await self._close_call(ctx, int(time.time() - ctx.started))
             # Dedup-delay before allowing re-join on sticky sessions
             await asyncio.sleep(5)
             self.calls.pop(room_id, None)
 
-    async def _track_task(self, speaker: str, track, room_id: str) -> None:
+    async def _close_call(self, ctx: CallContext, duration_s: int) -> None:
+        """Post end-of-call notes: LLM renskrivning, raw transcript fallback."""
+        room_id = ctx.room_id
+        if not self.cfg.post_to_room or ctx.thread_root is None:
+            return
+        minutes = max(1, duration_s // 60)
+        if not ctx.transcript:
+            try:
+                await self.matrix.post_message(
+                    room_id,
+                    "📝 Transkriberingen avslutad — inget tal fångades.",
+                    thread_root=ctx.thread_root,
+                )
+            except Exception:
+                log.exception("[%s] closing post failed", room_id)
+            return
+
+        summary_html = None
+        if self.cfg.post_summary:
+            summary_html = await summarize(
+                self.cfg.berget_api_base,
+                self.cfg.berget_api_key,
+                self.cfg.summary_model,
+                ctx.transcript,
+            )
+        # Fallback: råtranskriptet rakt av om LLM-renskrivningen misslyckas.
+        if not summary_html:
+            summary_html = "<br>".join(html.escape(line) for line in ctx.transcript)
+        plain = f"📄 Mötesanteckningar ({minutes} min)\n\n" + "\n".join(ctx.transcript)
+        body = f"📄 <b>Mötesanteckningar</b> ({minutes} min)<br>{summary_html}"
+        try:
+            await self.matrix.post_message(
+                room_id,
+                plain,
+                html=body,
+                thread_root=ctx.thread_root,
+            )
+        except Exception:
+            log.exception("[%s] summary post failed", room_id)
+
+    async def _track_task(self, ctx: CallContext, speaker: str, track) -> None:
         from livekit.rtc import AudioStream
 
         # AudioStream resamples/decodes internally; output is 24 kHz mono s16 PCM,
@@ -121,13 +179,21 @@ class Bot:
         stream = AudioStream(track, sample_rate=24000, num_channels=1)
 
         async def on_text(sp: str, text: str, final: bool) -> None:
-            if final:
-                log.info("[%s] %s: %s", room_id, sp, text)
-                if self.cfg.post_to_room:
-                    try:
-                        await self.matrix.post_message(room_id, f"**{sp}:** {text}")
-                    except Exception:
-                        log.exception("[%s] post_message failed", room_id)
+            if not final:
+                return
+            log.info("[%s] %s: %s", ctx.room_id, sp, text)
+            ctx.add(sp, text)
+            if self.cfg.post_to_room:
+                try:
+                    esc = f"<b>{html.escape(sp)}:</b> {html.escape(text)}"
+                    await self.matrix.post_message(
+                        ctx.room_id,
+                        f"{sp}: {text}",
+                        html=esc,
+                        thread_root=ctx.thread_root,
+                    )
+                except Exception:
+                    log.exception("[%s] post_message failed", ctx.room_id)
 
         session = RealtimeSession(self.cfg, speaker, on_text)
         try:
