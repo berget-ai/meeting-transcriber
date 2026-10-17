@@ -46,8 +46,35 @@ class CallRoom:
         self.audio_tracks: list[tuple[rtc.RemoteParticipant, rtc.RemoteAudioTrack]] = []
 
     async def connect(self, url: str, jwt: str) -> None:
-        await self.room.connect(url, jwt)
+        # Element Call per-participant E2EE = LiveKit FrameCryptor AES-GCM
+        # (encryption_type GCM=1) with HKDF key derivation, ratchet window 10
+        # and a 256-slot keyring (MatrixKeyProvider.ts values). Keys arrive
+        # out-of-band via Olm-encrypted to-device events and are fed to the
+        # key provider via set_participant_key().
+        options = rtc.RoomOptions(
+            encryption=rtc.E2EEOptions(
+                key_provider_options=rtc.KeyProviderOptions(
+                    ratchet_salt=b"LKFrameEncryptionKey",
+                    ratchet_window_size=10,
+                    key_ring_size=256,
+                    # KeyDerivationFunction proto enum: PBKDF2=0, HKDF=1.
+                    # JS per-participant keys are HKDF — python defaults to
+                    # PBKDF2, so set it explicitly.
+                    key_derivation_function=1,
+                )
+            )
+        )
+        await self.room.connect(url, jwt, options=options)
         log.info("LiveKit connected to %s (%d remote participants)", url, len(self.room.remote_participants))
+
+    def set_participant_key(self, identity: str, key: bytes, index: int) -> bool:
+        """Install a 16-byte call media key for a participant (Olm to-device)."""
+        kp = getattr(self.room.e2ee_manager, "key_provider", None)
+        if kp is None:
+            return False
+        kp.set_key(identity, key, index)
+        log.info("call key installed for %s (index %d)", identity, index)
+        return True
 
     async def close(self) -> None:
         try:

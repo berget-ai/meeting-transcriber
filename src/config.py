@@ -15,6 +15,11 @@ class Config:
     homeserver: str = os.environ.get("HOMESERVER_URL", "https://matrix.berget.ai").rstrip("/")
     user_id: str = os.environ["MATRIX_USER_ID"]
     access_token: str = os.environ["MATRIX_ACCESS_TOKEN"]
+    # E2EE device identity (the MAS compat session's device — `whoami`).
+    device_id: str = os.environ.get("MATRIX_DEVICE_ID", "")
+    # Persistent vodozemac/Olm store (PVC-mounted in k8s). Ephemeral stores
+    # mean new identity keys per boot → broken Olm sessions + lost call keys.
+    store_path: str = os.environ.get("NIO_STORE_PATH", "/data/nio-store")
 
     # Only accept room invites from these users (full ids). Empty = accept none
     # unless the room is in room_ids below.

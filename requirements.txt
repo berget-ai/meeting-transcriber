@@ -1,4 +1,4 @@
-matrix-nio==0.25.2
+matrix-nio[e2e]==0.26.0
 livekit>=1.1.21,<2.0
 websockets>=15.0.1,<16
 aiohttp>=3.11.12,<4

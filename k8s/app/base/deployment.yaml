@@ -18,12 +18,18 @@ spec:
     spec:
       containers:
         - name: meeting-transcriber
-          image: ghcr.io/berget-ai/meeting-transcriber:0.0.1-rc.7
+          image: ghcr.io/berget-ai/meeting-transcriber:0.0.1-rc.8
           env:
             - name: HOMESERVER_URL
               value: "https://matrix.berget.ai"
             - name: MATRIX_USER_ID
               value: "@transcriber:berget.ai"
+            # Device of the MAS compat session (whoami). Keys upload once and
+            # persist in the PVC-backed nio store below.
+            - name: MATRIX_DEVICE_ID
+              value: "KeoHTZZh8b"
+            - name: NIO_STORE_PATH
+              value: "/data/nio-store"
             - name: SFU_GET_URL
               value: "https://matrix-rtc.berget.ai/sfu/get"
             - name: REALTIME_URL
@@ -33,6 +39,9 @@ spec:
           envFrom:
             - secretRef:
                 name: meeting-transcriber-secrets
+          volumeMounts:
+            - name: store
+              mountPath: /data
           ports:
             - containerPort: 8080
           resources:
@@ -54,3 +63,7 @@ spec:
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 10
+      volumes:
+        - name: store
+          persistentVolumeClaim:
+            claimName: meeting-transcriber-store

@@ -41,8 +41,25 @@ class Bot:
     def __init__(self):
         self.cfg = config
         self.matrix = Matrixing(self.cfg)
+        self.matrix.on_call_key = self._on_call_key
         self.calls: dict[str, asyncio.Task] = {}
+        self.active_calls: dict[str, CallRoom] = {}
+        # Keys that arrived before the matching LiveKit connect (publishers
+        # share their current key the moment they see our membership state).
+        self.pending_keys: dict[str, list[tuple[str, str, bytes, int]]] = {}
         self.display_cache: dict[str, str] = {}
+
+    async def _on_call_key(
+        self, room_id: str, sender: str, device_id: str, key: bytes, index: int
+    ) -> None:
+        # Our lk-jwt stack issues Legacy tokens → LiveKit identity is the
+        # plain "{user_id}:{device_id}" form.
+        identity = f"{sender}:{device_id}"
+        call = self.active_calls.get(room_id)
+        if call is not None and call.set_participant_key(identity, key, index):
+            return
+        self.pending_keys.setdefault(room_id, []).append((sender, device_id, key, index))
+        log.info("buffered call key from %s for %s (pre-connect)", identity, room_id)
 
     async def run(self) -> None:
         syncer = asyncio.ensure_future(self.matrix.sync_forever())
@@ -81,6 +98,12 @@ class Bot:
             openid = await self.matrix.openid_token()
             creds = await fetch_sfu_credentials(self.cfg.sfu_get_url, openid, room_id)
             await call.connect(creds["url"], creds["jwt"])
+            self.active_calls[room_id] = call
+            # Advertise ourselves as a call member so other participants
+            # Olm-encrypt their media keys to our device.
+            await self.matrix.set_call_membership(room_id, True)
+            for sender, device_id, key, index in self.pending_keys.pop(room_id, []):
+                call.set_participant_key(f"{sender}:{device_id}", key, index)
             if self.cfg.post_to_room:
                 banner = (
                     "📝 Transkribering aktiv — mötet transkriberas till "
@@ -88,6 +111,7 @@ class Bot:
                 )
                 ctx.thread_root = await self.matrix.post_message(room_id, banner)
 
+            membership_refresh = time.time()
             empty_since: float | None = None
             while True:
                 # Manage track tasks
@@ -117,6 +141,11 @@ class Bot:
                         return
                 else:
                     empty_since = None
+                # Keep the membership fresh (clients treat it as stale after
+                # its 4 h `expires` window without a rewrite).
+                if time.time() - membership_refresh > 1800:
+                    await self.matrix.set_call_membership(room_id, True)
+                    membership_refresh = time.time()
                 await asyncio.sleep(2)
         except Exception:
             log.exception("[%s] call task failed", room_id)
@@ -126,6 +155,12 @@ class Bot:
             if track_tasks:
                 await asyncio.gather(*track_tasks.values(), return_exceptions=True)
             await call.close()
+            self.active_calls.pop(room_id, None)
+            self.pending_keys.pop(room_id, None)
+            try:
+                await self.matrix.set_call_membership(room_id, False)
+            except Exception:
+                log.exception("[%s] membership clear failed", room_id)
             await self._close_call(ctx, int(time.time() - ctx.started))
             # Dedup-delay before allowing re-join on sticky sessions
             await asyncio.sleep(5)
