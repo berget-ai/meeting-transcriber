@@ -12,6 +12,7 @@ import aiohttp
 from nio import AsyncClient, AsyncClientConfig
 from nio.crypto.olm_machine import Olm
 from nio.events.to_device import UnknownToDeviceEvent
+from nio.exceptions import OlmUnverifiedDeviceError
 from nio.responses import RoomSendError
 
 from .config import Config
@@ -222,15 +223,41 @@ class Matrixing:
                 "is_falling_back": True,
                 "m.in_reply_to": {"event_id": thread_root},
             }
-        resp = await self.client.room_send(
-            room_id,
-            message_type="m.room.message",
-            content=content,
-        )
+        try:
+            resp = await self.client.room_send(
+                room_id,
+                message_type="m.room.message",
+                content=content,
+            )
+        except OlmUnverifiedDeviceError:
+            # Encrypted room: nio refuses to share our Megolm session with
+            # unverified devices. The bot's whole job is posting into rooms it
+            # was invited to, so trust-on-first-use for every device it has
+            # seen there, then retry once.
+            log.info("trusting all known devices after OlmUnverifiedDeviceError")
+            self._trust_all_devices()
+            resp = await self.client.room_send(
+                room_id,
+                message_type="m.room.message",
+                content=content,
+            )
         if isinstance(resp, RoomSendError):
             log.warning("[%s] post failed: %s", room_id, resp)
             return None
         return getattr(resp, "event_id", None)
+
+    def _trust_all_devices(self) -> None:
+        """TOFU-verify every device in the store (all are colleagues' devices
+        seen in rooms the bot was invited to)."""
+        from nio.crypto import TrustState
+
+        for user_devices in self.client.device_store.values():
+            for device in user_devices.values():
+                if device.trust_state in (TrustState.unset, TrustState.ignored):
+                    try:
+                        self.client.verify_device(device)
+                    except Exception:
+                        log.exception("verify_device failed for %s", device)
 
     async def set_call_membership(self, room_id: str, active: bool) -> None:
         """Publish/clear our own msc3401 call.member state.
