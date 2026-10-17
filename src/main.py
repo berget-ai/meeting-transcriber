@@ -70,15 +70,19 @@ class Bot:
             while True:
                 # Manage track tasks
                 wanted = {
-                    (p.identity, track.sid): (p, track)
-                    for p, track in call.remote_audio()
+                    (p.identity, track.sid): (p, track, enc)
+                    for p, track, enc in call.remote_audio()
                 }
                 for key in list(track_tasks):
                     if key not in wanted:
                         track_tasks.pop(key).cancel()
-                for key, (participant, track) in wanted.items():
+                for key, (participant, track, enc) in wanted.items():
                     if key not in track_tasks:
                         speaker = await self._speaker_name(room_id, participant)
+                        log.info(
+                            "[%s] subscribing audio track %s from %s (encryption_type=%d, 0=NONE)",
+                            room_id, track.sid, participant.identity, enc,
+                        )
                         track_tasks[key] = asyncio.ensure_future(
                             self._track_task(speaker, track, room_id)
                         )

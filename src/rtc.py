@@ -55,12 +55,15 @@ class CallRoom:
         except Exception:
             pass
 
-    def remote_audio(self) -> list[tuple[rtc.RemoteParticipant, rtc.RemoteAudioTrack]]:
+    def remote_audio(self) -> list[tuple[rtc.RemoteParticipant, rtc.RemoteAudioTrack, int]]:
         out = []
         for p in self.room.remote_participants.values():
             for pub in p.track_publications.values():
                 if pub.kind == rtc.TrackKind.KIND_AUDIO and pub.track is not None:
-                    out.append((p, pub.track))
+                    # encryption_type (LiveKit proto enum) decides whether the
+                    # frame payloads are per-participant SFrame ciphertext —
+                    # the instance our decryption story for E2EE calls is.
+                    out.append((p, pub.track, int(pub.encryption_type)))
         return out
 
     @property

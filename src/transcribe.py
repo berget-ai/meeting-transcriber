@@ -91,19 +91,29 @@ class RealtimeSession:
 
     async def _pump(self, audio_stream) -> None:
         # Send whole AudioFrames as they arrive (~10 ms each); any chunking works.
+        # Throughput logging (every ~5 s) is our canary for silent/encrypted tracks.
+        pushed = 0
+        last_log = asyncio.get_running_loop().time()
         async for event in audio_stream:
             if self._closed:
                 return
             data = bytes(event.frame.data)
-            if data:
-                await self._ws.send(
-                    json.dumps(
-                        {
-                            "type": "input_audio_buffer.append",
-                            "audio": base64.b64encode(data).decode(),
-                        }
-                    )
+            if not data:
+                continue
+            pushed += len(data)
+            now = asyncio.get_running_loop().time()
+            if now - last_log >= 5:
+                log.info("[%s] realtime pump: %d PCM bytes pushed / 5 s", self.speaker, pushed)
+                pushed = 0
+                last_log = now
+            await self._ws.send(
+                json.dumps(
+                    {
+                        "type": "input_audio_buffer.append",
+                        "audio": base64.b64encode(data).decode(),
+                    }
                 )
+            )
 
     async def _receive(self) -> None:
         async for raw in self._ws:
@@ -119,6 +129,10 @@ class RealtimeSession:
                 if text.strip():
                     await self.on_text(self.speaker, text.strip(), True)
             elif mtype in ("session.created", "session.updated", "conversation.created"):
-                log.debug("[%s] %s", self.speaker, mtype)
+                log.info("[%s] %s", self.speaker, mtype)
+            elif mtype in ("input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped"):
+                log.info("[%s] VAD %s", self.speaker, mtype.split(".")[-1])
+            elif mtype == "conversation.item.input_audio_transcription.failed":
+                log.error("[%s] transcription FAILED: %s", self.speaker, msg)
             elif mtype == "error":
                 log.error("[%s] realtime error: %s", self.speaker, msg.get("error", msg))
