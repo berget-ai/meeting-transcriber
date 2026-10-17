@@ -16,9 +16,13 @@ spec:
       labels:
         app: meeting-transcriber
     spec:
+      # Container runs as 10001:10001 (image USER); the PVC mounts root-owned
+      # without this, and the nio crypto store cannot mkdir.
+      securityContext:
+        fsGroup: 10001
       containers:
         - name: meeting-transcriber
-          image: ghcr.io/berget-ai/meeting-transcriber:0.0.1-rc.8
+          image: ghcr.io/berget-ai/meeting-transcriber:0.0.1-rc.9
           env:
             - name: HOMESERVER_URL
               value: "https://matrix.berget.ai"
