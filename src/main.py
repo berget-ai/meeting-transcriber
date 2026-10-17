@@ -102,6 +102,13 @@ class Bot:
         ctx = CallContext(room_id)
         track_tasks: dict[tuple[str, str], asyncio.Task] = {}
         try:
+            # Force a real leave→join transition BEFORE connecting: publishers
+            # only Olm-encrypt their current media key when they see a member
+            # JOIN (or rotate on leave). A bot that re-connects with an
+            # already-published membership looks unchanged and gets no keys —
+            # its fresh LiveKit KeyProvider would stay empty (chiffertext in,
+            # noise out). Clearing first makes the rejoin visible.
+            await self.matrix.set_call_membership(room_id, False)
             openid = await self.matrix.openid_token()
             creds = await fetch_sfu_credentials(self.cfg.sfu_get_url, openid, room_id)
             await call.connect(creds["url"], creds["jwt"])
