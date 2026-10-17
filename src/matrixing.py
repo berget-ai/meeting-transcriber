@@ -36,12 +36,13 @@ class Matrixing:
         while True:
             try:
                 resp = await self.client.sync(timeout=15_000, full_state=False)
-                if hasattr(resp, "rooms") and resp.rooms and "invite" in resp.rooms:
-                    for room_id in resp.rooms["invite"]:
-                        try:
-                            await self._handle_invite(room_id)
-                        except Exception:
-                            log.exception("invite handling failed for %s", room_id)
+                # nio types SyncResponse.rooms as a Rooms dataclass, not dict
+                invites = getattr(resp.rooms, "invite", None) or {}
+                for room_id in invites:
+                    try:
+                        await self._handle_invite(room_id)
+                    except Exception:
+                        log.exception("invite handling failed for %s", room_id)
             except Exception:
                 log.exception("sync failed")
                 await asyncio.sleep(5)
