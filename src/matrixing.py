@@ -84,16 +84,29 @@ class Matrixing:
         return sorted(rooms)
 
     async def active_rtc_sessions(self, room_id: str) -> list[dict[str, Any]]:
-        """Return the msc3401 call.member event content list, or [] when no call."""
+        """Return the active per-device MSC3401 call.member contents (may be []).
+
+        Modern MSC3401 stores membership as per-device state events whose
+        content is a single membership object — active when that object is
+        non-empty. The expired state_key "" listing from the first spec draft
+        never carries data on current clients, so we enumerate full room state
+        and filter on event type.
+        """
         http = await self._session()
-        url = f"{self.cfg.homeserver}/_matrix/client/v3/rooms/{room_id}/state/{MSC3401_MEMBER}"
+        url = f"{self.cfg.homeserver}/_matrix/client/v3/rooms/{room_id}/state"
         async with http.get(url) as resp:
             if resp.status != 200:
                 return []
-            data = await resp.json()
-        if isinstance(data, list):
-            return [m for m in data if isinstance(m, dict)]
-        return []
+            events = await resp.json()
+        out = []
+        for event in events:
+            if event.get("type") == MSC3401_MEMBER:
+                content = event.get("content")
+                if isinstance(content, dict) and content:
+                    out.append(content)
+                elif isinstance(content, list):
+                    out.extend(m for m in content if isinstance(m, dict) and m)
+        return out
 
     async def openid_token(self) -> dict[str, Any]:
         http = await self._session()
