@@ -21,10 +21,14 @@ OnText = Callable[[str, str, bool], Awaitable[None]]  # speaker, text, final
 
 
 class RealtimeSession:
-    def __init__(self, cfg: Config, speaker: str, on_text: OnText):
+    def __init__(self, cfg: Config, speaker: str, on_text: OnText, on_audio=None):
         self.cfg = cfg
         self.speaker = speaker
         self.on_text = on_text
+        # Heartbeat hook (CallRoom.touch): invoked every pump-log tick while
+        # audio frames flow, so the zombie-room watchdog can tell live media
+        # from a dead room instance.
+        self.on_audio = on_audio
         self._ws = None
         self._closed = False
         self._transcript_parts: list[str] = []
@@ -106,6 +110,8 @@ class RealtimeSession:
                 log.info("[%s] realtime pump: %d PCM bytes pushed / 5 s", self.speaker, pushed)
                 pushed = 0
                 last_log = now
+                if self.on_audio:
+                    self.on_audio()
             await self._ws.send(
                 json.dumps(
                     {

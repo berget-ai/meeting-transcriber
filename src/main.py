@@ -14,6 +14,7 @@ import html
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 from .config import config
 from .matrixing import Matrixing
@@ -32,9 +33,15 @@ class CallContext:
     thread_root: str | None = None
     transcript: list[str] = field(default_factory=list)
     started: float = field(default_factory=time.time)
+    # Set once the LiveKit room connects — heartbeat target for audio pumps.
+    call: Any | None = None
 
     def add(self, speaker: str, text: str) -> None:
         self.transcript.append(f"{speaker}: {text}")
+
+    def touch(self) -> None:
+        if self.call is not None:
+            self.call.touch()
 
 
 class Bot:
@@ -99,6 +106,7 @@ class Bot:
             creds = await fetch_sfu_credentials(self.cfg.sfu_get_url, openid, room_id)
             await call.connect(creds["url"], creds["jwt"])
             self.active_calls[room_id] = call
+            ctx.call = call
             # Advertise ourselves as a call member so other participants
             # Olm-encrypt their media keys to our device.
             await self.matrix.set_call_membership(room_id, True)
@@ -133,6 +141,18 @@ class Bot:
                             self._track_task(ctx, speaker, track)
                         )
 
+                # Zombie-room exits: server closed the room instance under us
+                # (disconnect event) or nothing at all has happened for a
+                # long time — leave so tick() re-joins the fresh instance.
+                if call.dead:
+                    log.info("[%s] connection dead, leaving to rejoin", room_id)
+                    return
+                if call.stale(self.cfg.stale_seconds):
+                    log.info(
+                        "[%s] no LiveKit activity for %ds, rejoining",
+                        room_id, self.cfg.stale_seconds,
+                    )
+                    return
                 # Leave when everyone else is gone for a while
                 if call.empty:
                     empty_since = empty_since or time.time()
@@ -230,7 +250,7 @@ class Bot:
                 except Exception:
                     log.exception("[%s] post_message failed", ctx.room_id)
 
-        session = RealtimeSession(self.cfg, speaker, on_text)
+        session = RealtimeSession(self.cfg, speaker, on_text, on_audio=ctx.touch)
         try:
             await session.run(stream)
         finally:

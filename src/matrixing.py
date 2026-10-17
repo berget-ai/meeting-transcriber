@@ -78,28 +78,12 @@ class Matrixing:
     async def _on_to_device(self, event: UnknownToDeviceEvent) -> None:
         if event.type != CALL_KEYS_EVENT or self.on_call_key is None:
             return
-        content = event.source.get("content", {})
-        room_id = content.get("room_id")
-        member = content.get("member") or {}
-        device_id = member.get("claimed_device_id")
-        key_obj = content.get("media_key") or content.get("keys")
-        if not (room_id and device_id and isinstance(key_obj, dict)):
-            log.warning("malformed %s from %s: %s", CALL_KEYS_EVENT, event.sender, content)
+        parsed = parse_call_key_event(event.source.get("content", {}))
+        if parsed is None:
+            log.warning("malformed %s from %s", CALL_KEYS_EVENT, event.sender)
             return
-        raw = key_obj.get("key", "")
-        # Spec comment says unpadded base64; js-sdk currently emits padded.
-        raw += "=" * (-len(raw) % 4)
-        try:
-            key_bytes = base64.b64decode(raw)
-        except Exception:
-            log.warning("bad base64 key from %s", event.sender)
-            return
-        if len(key_bytes) != 16:
-            log.warning("unexpected key length %d from %s", len(key_bytes), event.sender)
-            return
-        await self.on_call_key(
-            room_id, event.sender, device_id, key_bytes, int(key_obj.get("index", 0))
-        )
+        room_id, device_id, key_bytes, index = parsed
+        await self.on_call_key(room_id, event.sender, device_id, key_bytes, index)
 
     async def _session(self) -> aiohttp.ClientSession:
         if self._http is None or self._http.closed:
@@ -109,6 +93,7 @@ class Matrixing:
         return self._http
 
     async def sync_forever(self) -> None:
+        first = True
         while True:
             try:
                 # Raw sync() (not client.sync_forever) → we must drive key
@@ -117,7 +102,11 @@ class Matrixing:
                 # call keys to us.
                 if self.client.should_upload_keys:
                     await self.client.keys_upload()
-                resp = await self.client.sync(timeout=15_000, full_state=False)
+                # First sync after boot needs full_state: with a persisted
+                # store the resumed sync token yields zero room frames, and
+                # nio's joined_rooms cache would stay empty forever.
+                resp = await self.client.sync(timeout=15_000, full_state=first)
+                first = False
                 # nio types SyncResponse.rooms as a Rooms dataclass, not dict
                 invites = getattr(resp.rooms, "invite", None) or {}
                 for room_id in invites:
@@ -162,33 +151,29 @@ class Matrixing:
             log.info("Ignoring invite to %s (inviter %r not allowlisted)", room_id, inviter)
 
     async def joined_rooms(self) -> list[str]:
-        rooms = set(self.cfg.room_ids) | set(self.client.rooms.keys())
+        # Authoritative REST lookup instead of nio's cache: with a resumed
+        # sync token the cache can lag/empty even when full_state ran.
+        http = await self._session()
+        url = f"{self.cfg.homeserver}/_matrix/client/v3/joined_rooms"
+        rooms = set(self.cfg.room_ids)
+        try:
+            async with http.get(url) as resp:
+                if resp.status == 200:
+                    rooms.update((await resp.json()).get("joined_rooms", []))
+        except Exception:
+            log.exception("joined_rooms fetch failed, falling back to nio cache")
+            rooms.update(self.client.rooms.keys())
         return sorted(rooms)
 
     async def active_rtc_sessions(self, room_id: str) -> list[dict[str, Any]]:
-        """Return the active per-device MSC3401 call.member contents (may be []).
-
-        Modern MSC3401 stores membership as per-device state events whose
-        content is a single membership object — active when that object is
-        non-empty. The expired state_key "" listing from the first spec draft
-        never carries data on current clients, so we enumerate full room state
-        and filter on event type.
-        """
+        """Active per-device MSC3401 call.member contents (may be [])."""
         http = await self._session()
         url = f"{self.cfg.homeserver}/_matrix/client/v3/rooms/{room_id}/state"
         async with http.get(url) as resp:
             if resp.status != 200:
                 return []
             events = await resp.json()
-        out = []
-        for event in events:
-            if event.get("type") == MSC3401_MEMBER:
-                content = event.get("content")
-                if isinstance(content, dict) and content:
-                    out.append(content)
-                elif isinstance(content, list):
-                    out.extend(m for m in content if isinstance(m, dict) and m)
-        return out
+        return extract_sessions(events)
 
     async def openid_token(self) -> dict[str, Any]:
         http = await self._session()
@@ -308,3 +293,50 @@ class Matrixing:
         except Exception:
             pass
         return user_id
+
+
+def extract_sessions(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Pure parser: MSC3401 membership from a room-state event list.
+
+    Modern MSC3401 stores membership as per-device state events whose content
+    is a single membership object — active when that object is non-empty.
+    The first spec draft used one event at state_key "" holding a list of
+    memberships; accept both shapes (unit-tested).
+    """
+    out: list[dict[str, Any]] = []
+    for event in events:
+        if event.get("type") != MSC3401_MEMBER:
+            continue
+        content = event.get("content")
+        if isinstance(content, dict) and content:
+            out.append(content)
+        elif isinstance(content, list):
+            out.extend(m for m in content if isinstance(m, dict) and m)
+    return out
+
+
+def parse_call_key_event(
+    content: dict[str, Any],
+) -> tuple[str, str, bytes, int] | None:
+    """Parse io.element.call.encryption_keys content (unit-tested).
+
+    Current shape: {room_id, member_id, media_key:{index,key}, member:
+    {claimed_device_id,id}}; `keys` is the deprecated duplicate of media_key.
+    Key is base64 (padded or unpadded), 16 raw bytes. None when malformed.
+    """
+    room_id = content.get("room_id")
+    member = content.get("member") or {}
+    device_id = member.get("claimed_device_id")
+    key_obj = content.get("media_key") or content.get("keys")
+    if not (room_id and device_id and isinstance(key_obj, dict)):
+        return None
+    raw = key_obj.get("key", "")
+    # Spec comment says unpadded base64; js-sdk currently emits padded.
+    raw += "=" * (-len(raw) % 4)
+    try:
+        key_bytes = base64.b64decode(raw)
+    except Exception:
+        return None
+    if len(key_bytes) != 16:
+        return None
+    return room_id, device_id, key_bytes, int(key_obj.get("index", 0))

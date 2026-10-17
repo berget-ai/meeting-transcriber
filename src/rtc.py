@@ -9,6 +9,7 @@ Flow (same as Element Call clients):
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 import aiohttp
@@ -38,12 +39,52 @@ async def fetch_sfu_credentials(
 
 
 class CallRoom:
-    """A joined LiveKit room we listen to."""
+    """A joined LiveKit room we listen to.
+
+    Zombie-safety: the SFU closes a room instance when it empties; a later
+    call re-creates it under a new room_sid. Our signal websocket can stay
+    open against the dead instance without any event reaching the SDK, and
+    remote_participants keeps stale entries — so `empty` alone can never be
+    trusted. We therefore track:
+      - `dead`: set by the SDK "disconnected" event (clean leave signal), and
+      - `last_activity`: bumped by any participant/track event AND by audio
+        frames flowing through the transcription pump (touch()).
+    The main loop leaves + rejoins when dead, or when stale() times out.
+    """
 
     def __init__(self, matrix_room_id: str):
         self.matrix_room_id = matrix_room_id
         self.room = rtc.Room()
-        self.audio_tracks: list[tuple[rtc.RemoteParticipant, rtc.RemoteAudioTrack]] = []
+        self.dead = False
+        self.last_activity = time.time()
+        self._wire_events()
+
+    def _wire_events(self) -> None:
+        def on_disconnected(*_args):
+            log.warning("[%s] LiveKit disconnected by server/SDK", self.matrix_room_id)
+            self.dead = True
+
+        def on_activity(*_args):
+            self.last_activity = time.time()
+
+        self.room.on("disconnected")(on_disconnected)
+        for event in (
+            "participant_connected",
+            "participant_disconnected",
+            "track_published",
+            "track_unpublished",
+            "track_subscribed",
+            "reconnecting",
+            "reconnected",
+        ):
+            self.room.on(event)(on_activity)
+
+    def touch(self) -> None:
+        """Heartbeat from the audio pump — proof the media path is alive."""
+        self.last_activity = time.time()
+
+    def stale(self, seconds: float) -> bool:
+        return (time.time() - self.last_activity) > seconds
 
     async def connect(self, url: str, jwt: str) -> None:
         # Element Call per-participant E2EE = LiveKit FrameCryptor AES-GCM
@@ -65,6 +106,7 @@ class CallRoom:
             )
         )
         await self.room.connect(url, jwt, options=options)
+        self.last_activity = time.time()
         log.info("LiveKit connected to %s (%d remote participants)", url, len(self.room.remote_participants))
 
     def set_participant_key(self, identity: str, key: bytes, index: int) -> bool:

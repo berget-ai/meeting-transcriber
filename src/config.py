@@ -44,6 +44,10 @@ class Config:
     summary_model: str = os.environ.get("SUMMARY_MODEL", "moonshotai/Kimi-K3")
     # How often we check MatrixRTC rooms for active sessions (seconds).
     poll_interval: int = int(os.environ.get("POLL_INTERVAL", "15"))
+    # Zombie-room watchdog: leave+rejoin when no LiveKit events AND no audio
+    # frames for this long (SFU can close the room instance without the
+    # signal socket noticing).
+    stale_seconds: int = int(os.environ.get("STALE_SECONDS", "900"))
 
 
 config = Config()
