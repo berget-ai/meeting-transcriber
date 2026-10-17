@@ -126,6 +126,7 @@ class RealtimeSession:
             elif mtype == "conversation.item.input_audio_transcription.completed":
                 text = msg.get("transcript") or "".join(self._transcript_parts)
                 self._transcript_parts.clear()
+                log.info("[%s] completed -> %r", self.speaker, text.strip())
                 if text.strip():
                     await self.on_text(self.speaker, text.strip(), True)
             elif mtype in ("session.created", "session.updated", "conversation.created"):
