@@ -5,6 +5,7 @@ namespace: meeting-transcriber
 
 resources:
   - ../../base
+  - ../../namespace.yaml  # namespace owned by this app (no infra-side copy)
 
 images:
   - name: ghcr.io/berget-ai/meeting-transcriber
