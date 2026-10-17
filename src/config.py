@@ -20,12 +20,27 @@ class Config:
     # Persistent vodozemac/Olm store (PVC-mounted in k8s). Ephemeral stores
     # mean new identity keys per boot → broken Olm sessions + lost call keys.
     store_path: str = os.environ.get("NIO_STORE_PATH", "/data/nio-store")
+    # Separate store-encryption key (defense in depth: the PVC holds the Olm
+    # identity + all Megolm sessions; without this the store is pickled with
+    # the very access token it protects). Falls back to the token for
+    # backwards compatibility — set NIO_PICKLE_KEY in OpenBao.
+    pickle_key: str = os.environ.get("NIO_PICKLE_KEY", "")
 
-    # Only accept room invites from these users (full ids). Empty = accept none
-    # unless the room is in room_ids below.
+    # Invite policy. Default: only same-homeserver users may invite the bot
+    # (derived from MATRIX_USER_ID) — federation is open on our Synapse, so
+    # without this anyone on the public Matrix network could borrow the bot
+    # (API costs billed to us + phishing prop value).
     accept_invites_from: list[str] = field(default_factory=lambda: _csv("ACCEPT_INVITES_FROM"))
+    allowed_inviter_homeservers: list[str] = field(
+        default_factory=lambda: _csv("ALLOWED_INVITER_HOMESERVERS")
+        or [os.environ.get("MATRIX_USER_ID", "@bot:x").rsplit(":", 1)[-1]]
+    )
     # Rooms to always stay in regardless of invites.
     room_ids: list[str] = field(default_factory=lambda: _csv("ROOM_IDS"))
+    # Circuit breakers.
+    max_concurrent_calls: int = int(os.environ.get("MAX_CONCURRENT_CALLS", "3"))
+    max_rooms: int = int(os.environ.get("MAX_ROOMS", "25"))
+    invite_cooldown_seconds: int = int(os.environ.get("INVITE_COOLDOWN_SECONDS", "86400"))
 
     # RTC stack (Element ESS layout on our homeserver).
     sfu_get_url: str = os.environ.get("SFU_GET_URL", "https://matrix-rtc.berget.ai/sfu/get")

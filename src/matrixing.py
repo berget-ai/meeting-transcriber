@@ -9,7 +9,9 @@ import os
 from typing import Any, Callable, Awaitable
 
 import aiohttp
-from nio import AsyncClient, AsyncClientConfig
+import time
+
+from nio import AsyncClient, AsyncClientConfig, RoomMessageText
 from nio.crypto.olm_machine import Olm
 from nio.events.to_device import UnknownToDeviceEvent
 from nio.exceptions import OlmUnverifiedDeviceError
@@ -48,13 +50,16 @@ class Matrixing:
         _patch_olm_custom_events()
         # nio's peewee store does not create the parent dir itself.
         os.makedirs(cfg.store_path, exist_ok=True)
+        pickle_key = cfg.pickle_key or cfg.access_token
+        if not cfg.pickle_key:
+            log.warning(
+                "NIO_PICKLE_KEY unset — store pickled with the access token it "
+                "protects (defense-in-depth gap; set it in OpenBao)"
+            )
         config = AsyncClientConfig(
             encryption_enabled=True,
             store_sync_tokens=True,
-            # pickle_key protects the on-disk Olm account in the store. The
-            # access token is already the pod's most sensitive secret and lives
-            # in the same boundary (OpenBao-seeded env), so reuse it.
-            pickle_key=cfg.access_token,
+            pickle_key=pickle_key,
         )
         self.client = AsyncClient(
             cfg.homeserver,
@@ -69,11 +74,36 @@ class Matrixing:
             access_token=cfg.access_token,
         )
         self.client.add_to_device_callback(self._on_to_device, UnknownToDeviceEvent)
+        self.client.add_event_callback(self._on_room_message, RoomMessageText)
         # Set by main.Bot: (room_id, sender, claimed_device_id, key_bytes, index)
         self.on_call_key: Callable[[str, str, str, bytes, int], Awaitable[None]] | None = None
+        # room_id → epoch when we left/were kicked; re-invites are refused
+        # during cfg.invite_cooldown_seconds (kick-respect).
+        self.invite_cooldowns: dict[str, float] = {}
         # ClientSession is created lazily: it must exist inside a running
         # event loop, so __init__ (called synchronously) cannot own it.
         self._http: aiohttp.ClientSession | None = None
+
+    async def _on_room_message(self, room, event) -> None:
+        """Leave command: any room member can evict the bot by chat."""
+        sender = getattr(event, "sender", "")
+        if sender == self.cfg.user_id:
+            return
+        body = (getattr(event, "body", "") or "").strip().lower()
+        if body not in ("!transcriber leave", "!transkriber leave", "!transcriber lämna"):
+            return
+        log.info("leave command from %s in %s", sender, room.room_id)
+        try:
+            await self.post_message(
+                room.room_id,
+                "Okej — jag lämnar rummet och transkriberar inte mer här. 👋",
+            )
+        except Exception:
+            pass
+        try:
+            await self.client.room_leave(room.room_id)
+        except Exception:
+            log.exception("room_leave failed for %s", room.room_id)
 
     async def _on_to_device(self, event: UnknownToDeviceEvent) -> None:
         if event.type != CALL_KEYS_EVENT or self.on_call_key is None:
@@ -128,27 +158,58 @@ class Matrixing:
             except Exception:
                 log.exception("sweep-invite handling failed for %s", room_id)
 
+    def inviter_allowed(self, inviter: str | None) -> bool:
+        """Invite policy: exact user match, else same-homeserver (suffix)."""
+        if not inviter:
+            return False
+        if inviter in self.cfg.accept_invites_from:
+            return True
+        server = inviter.rsplit(":", 1)[-1]
+        return server in self.cfg.allowed_inviter_homeservers
+
     async def _handle_invite(self, room_id: str) -> None:
-        inviter_ok = True
-        if self.cfg.accept_invites_from and room_id not in self.cfg.room_ids:
-            inviter = None
-            try:
-                # The bot's m.room.member state event for an invite is authored by
-                # the inviter, so its sender field identifies who to check.
-                resp = await self.client.room_get_state_event(room_id, "m.room.member", self.cfg.user_id)
-                inviter = getattr(resp, "sender", None)
-            except Exception:
-                pass
-            inviter_ok = inviter in self.cfg.accept_invites_from
-        if inviter_ok:
-            if room_id in self.client.rooms:
-                return  # already joined
-            log.info("Joining invited room %s", room_id)
-            resp = await self.client.join(room_id)
-            if getattr(resp, "message", None):
-                log.warning("join(%s) returned %s", room_id, resp.message)
-        else:
-            log.info("Ignoring invite to %s (inviter %r not allowlisted)", room_id, inviter)
+        if room_id in self.client.rooms:
+            return  # already joined
+        if room_id in self.cfg.room_ids:
+            await self._join_and_greet(room_id)
+            return
+        # Kick/leave respect: refuse re-invites during the cooldown window.
+        cooled = self.invite_cooldowns.get(room_id)
+        if cooled and time.time() - cooled < self.cfg.invite_cooldown_seconds:
+            log.info("Ignoring re-invite to %s (cooldown)", room_id)
+            return
+        # Circuit breaker: bounded blast radius for invite abuse.
+        if len(await self.joined_rooms()) >= self.cfg.max_rooms:
+            log.warning("Ignoring invite to %s (max_rooms=%d)", room_id, self.cfg.max_rooms)
+            return
+        inviter = None
+        try:
+            # The bot's m.room.member state event for an invite is authored by
+            # the inviter, so its sender field identifies who to check.
+            resp = await self.client.room_get_state_event(room_id, "m.room.member", self.cfg.user_id)
+            inviter = getattr(resp, "sender", None)
+        except Exception:
+            pass
+        if not self.inviter_allowed(inviter):
+            log.info("Ignoring invite to %s (inviter %r not allowed)", room_id, inviter)
+            return
+        await self._join_and_greet(room_id)
+
+    async def _join_and_greet(self, room_id: str) -> None:
+        log.info("Joining invited room %s", room_id)
+        resp = await self.client.join(room_id)
+        if getattr(resp, "message", None):
+            log.warning("join(%s) returned %s", room_id, resp.message)
+            return
+        try:
+            await self.post_message(
+                room_id,
+                "📝 Transkriberingsbot tillagd. Jag transkriberar videosamtal "
+                "i det här rummet och postar text + mötesanteckningar i trådar. "
+                "Skriv `!transcriber leave` eller ta bort mig för att stoppa.",
+            )
+        except Exception:
+            log.exception("greeting post failed in %s", room_id)
 
     async def joined_rooms(self) -> list[str]:
         # Authoritative REST lookup instead of nio's cache: with a resumed

@@ -92,6 +92,8 @@ class Bot:
         # share their current key the moment they see our membership state).
         self.pending_keys: dict[str, list[tuple[str, str, bytes, int]]] = {}
         self.display_cache: dict[str, str] = {}
+        self._prev_joined: set[str] = set()
+        self._membership_guard: dict[str, float] = {}
 
     async def _on_call_key(
         self, room_id: str, sender: str, device_id: str, key: bytes, index: int
@@ -121,18 +123,46 @@ class Bot:
 
     async def tick(self) -> None:
         await self.matrix.sweep_invited_rooms()
-        for room_id in await self.matrix.joined_rooms():
+        joined = await self.matrix.joined_rooms()
+        # Kick/leave detection: rooms we were in but no longer are → arm the
+        # invite cooldown so we can't be bounced straight back in.
+        prev = self._prev_joined
+        for gone in prev - set(joined):
+            if gone not in self.cfg.room_ids:
+                self.matrix.invite_cooldowns[gone] = time.time()
+                log.info("Departed room %s — invite cooldown armed", gone)
+        self._prev_joined = set(joined)
+
+        our_membership = f"{self.cfg.user_id}:{self.cfg.device_id}"
+        for room_id in joined:
             sessions = await self.matrix.active_rtc_sessions(room_id)
             # msc3401 member state can hold stale entries until their
             # delayed-leave expires; a 5 s cool-down after each call keeps us
             # from re-joining instantly on those tails.
             if sessions and room_id not in self.calls:
+                if len(self.calls) >= self.cfg.max_concurrent_calls:
+                    log.warning(
+                        "max_concurrent_calls=%d reached, not joining %s",
+                        self.cfg.max_concurrent_calls, room_id,
+                    )
+                    continue
                 log.info("Active MatrixRTC session in %s (%d source-lists); joining", room_id, len(sessions))
                 self.calls[room_id] = asyncio.ensure_future(
                     self._call_task(room_id)
                 )
             elif not sessions and room_id in self.calls:
                 log.info("Session ended in %s", room_id)
+            # Membership guard: any room member can overwrite our msc3401
+            # state (PL 0 event type, Matrix doesn't auth state_key owners),
+            # which silently cuts us out of key distribution. Republish.
+            elif sessions and room_id in self.calls and not any(
+                s.get("membershipID") == our_membership for s in sessions
+            ):
+                last = self._membership_guard.get(room_id, 0)
+                if time.time() - last > 60:
+                    log.warning("our call membership in %s was removed — republishing", room_id)
+                    await self.matrix.set_call_membership(room_id, True)
+                    self._membership_guard[room_id] = time.time()
 
     async def _call_task(self, room_id: str) -> None:
         call = CallRoom(room_id)
