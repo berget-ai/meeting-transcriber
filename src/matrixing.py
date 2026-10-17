@@ -208,6 +208,32 @@ class Matrixing:
                 "is_falling_back": True,
                 "m.in_reply_to": {"event_id": thread_root},
             }
+        return await self._send_content(room_id, content)
+
+    async def edit_message(
+        self,
+        room_id: str,
+        target_event_id: str,
+        body: str,
+        html: str | None = None,
+    ) -> str | None:
+        """Replace a previous message's content (m.replace edit).
+
+        Used to grow the current speaker's transcript segment in place
+        instead of spamming one thread message per utterance."""
+        new_content: dict[str, Any] = {"msgtype": "m.text", "body": body}
+        if html:
+            new_content["format"] = "org.matrix.custom.html"
+            new_content["formatted_body"] = html
+        content = {
+            "msgtype": "m.text",
+            "body": f"* {body}",
+            "m.new_content": new_content,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": target_event_id},
+        }
+        return await self._send_content(room_id, content)
+
+    async def _send_content(self, room_id: str, content: dict[str, Any]) -> str | None:
         try:
             resp = await self.client.room_send(
                 room_id,

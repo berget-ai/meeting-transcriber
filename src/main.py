@@ -25,6 +25,41 @@ from .transcribe import RealtimeSession
 log = logging.getLogger(__name__)
 
 
+class SegmentPoster:
+    """Coalesces consecutive utterances by the same speaker into ONE thread
+    message (edited in place via m.replace); a new message starts when the
+    speaker changes or the segment grows past max_chars."""
+
+    def __init__(self, matrix: Matrixing, room_id: str, thread_root: str | None, max_chars: int = 3000):
+        self.matrix = matrix
+        self.room_id = room_id
+        self.thread_root = thread_root
+        self.max_chars = max_chars
+        self.speaker: str | None = None
+        self.event_id: str | None = None
+        self.text = ""
+
+    async def add(self, speaker: str, text: str) -> None:
+        merged = f"{self.text} {text}".strip()
+        if self.speaker == speaker and self.event_id and len(merged) <= self.max_chars:
+            self.text = merged
+            await self.matrix.edit_message(
+                self.room_id,
+                self.event_id,
+                f"{speaker}: {self.text}",
+                html=f"<b>{html.escape(speaker)}:</b> {html.escape(self.text)}",
+            )
+            return
+        self.speaker = speaker
+        self.text = text
+        self.event_id = await self.matrix.post_message(
+            self.room_id,
+            f"{speaker}: {text}",
+            html=f"<b>{html.escape(speaker)}:</b> {html.escape(text)}",
+            thread_root=self.thread_root,
+        )
+
+
 @dataclass
 class CallContext:
     """Shared per-call state between the call task and per-track tasks."""
@@ -35,6 +70,8 @@ class CallContext:
     started: float = field(default_factory=time.time)
     # Set once the LiveKit room connects — heartbeat target for audio pumps.
     call: Any | None = None
+    # Set when the thread root exists — coalesces same-speaker utterances.
+    poster: SegmentPoster | None = None
 
     def add(self, speaker: str, text: str) -> None:
         self.transcript.append(f"{speaker}: {text}")
@@ -125,6 +162,7 @@ class Bot:
                     "Berget realtime. Svar i den här tråden."
                 )
                 ctx.thread_root = await self.matrix.post_message(room_id, banner)
+                ctx.poster = SegmentPoster(self.matrix, room_id, ctx.thread_root)
 
             membership_refresh = time.time()
             empty_since: float | None = None
@@ -245,17 +283,11 @@ class Bot:
                 return
             log.info("[%s] %s: %s", ctx.room_id, sp, text)
             ctx.add(sp, text)
-            if self.cfg.post_to_room:
+            if self.cfg.post_to_room and ctx.poster is not None:
                 try:
-                    esc = f"<b>{html.escape(sp)}:</b> {html.escape(text)}"
-                    await self.matrix.post_message(
-                        ctx.room_id,
-                        f"{sp}: {text}",
-                        html=esc,
-                        thread_root=ctx.thread_root,
-                    )
+                    await ctx.poster.add(sp, text)
                 except Exception:
-                    log.exception("[%s] post_message failed", ctx.room_id)
+                    log.exception("[%s] transcript post failed", ctx.room_id)
 
         session = RealtimeSession(self.cfg, speaker, on_text, on_audio=ctx.touch)
         try:

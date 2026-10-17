@@ -61,6 +61,17 @@ async def test_plain_message_without_thread():
 
 
 @pytest.mark.asyncio
+async def test_edit_message_replace_shape():
+    client = FakeClient()
+    m = _matrixing(client)
+    await m.edit_message("!r:x", "$orig", "Anna: hej hej", html="<b>Anna:</b> hej hej")
+    content = client.sent[0]
+    assert content["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$orig"}
+    assert content["body"].startswith("* ")  # spec fallback marker
+    assert content["m.new_content"]["formatted_body"] == "<b>Anna:</b> hej hej"
+
+
+@pytest.mark.asyncio
 async def test_unverified_device_triggers_trust_and_retry():
     client = FakeClient(fail_once=True)
     m = _matrixing(client)
