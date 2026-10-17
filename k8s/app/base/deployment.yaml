@@ -18,7 +18,7 @@ spec:
     spec:
       containers:
         - name: meeting-transcriber
-          image: ghcr.io/berget-ai/meeting-transcriber:0.0.1-rc.3
+          image: ghcr.io/berget-ai/meeting-transcriber:0.0.1-rc.4
           env:
             - name: HOMESERVER_URL
               value: "https://matrix.berget.ai"
