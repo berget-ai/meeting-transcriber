@@ -8,6 +8,10 @@ spec:
   # Single replica: this process joins MatrixRTC sessions and duplexes audio;
   # a second replica would double-join and double-transcribe.
   replicas: 1
+  # Recreate: the RWO PVC (nio crypto store) cannot multi-attach — a
+  # RollingUpdate deadlocks old-vs-new pod on the volume.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: meeting-transcriber
