@@ -33,13 +33,28 @@ class Matrixing:
         return self._http
 
     async def sync_forever(self) -> None:
-        self.client.add_invite_callback = None  # polling model; no callbacks
         while True:
-            resp = await self.client.sync(timeout=15_000, full_state=False)
-            if hasattr(resp, "rooms") and resp.rooms and "invite" in resp.rooms:
-                for room_id, invite in resp.rooms["invite"].items():
-                    await self._handle_invite(room_id)
+            try:
+                resp = await self.client.sync(timeout=15_000, full_state=False)
+                if hasattr(resp, "rooms") and resp.rooms and "invite" in resp.rooms:
+                    for room_id in resp.rooms["invite"]:
+                        try:
+                            await self._handle_invite(room_id)
+                        except Exception:
+                            log.exception("invite handling failed for %s", room_id)
+            except Exception:
+                log.exception("sync failed")
+                await asyncio.sleep(5)
             await asyncio.sleep(1)
+
+    async def sweep_invited_rooms(self) -> None:
+        """Safety net: nio keeps invited rooms in client.invited_rooms even
+        if a sync frame was missed — join any allowed one."""
+        for room_id in list(getattr(self.client, "invited_rooms", {}) or []):
+            try:
+                await self._handle_invite(room_id)
+            except Exception:
+                log.exception("sweep-invite handling failed for %s", room_id)
 
     async def _handle_invite(self, room_id: str) -> None:
         inviter_ok = True
@@ -54,8 +69,12 @@ class Matrixing:
                 pass
             inviter_ok = inviter in self.cfg.accept_invites_from
         if inviter_ok:
+            if room_id in self.client.rooms:
+                return  # already joined
             log.info("Joining invited room %s", room_id)
-            await self.client.join(room_id)
+            resp = await self.client.join(room_id)
+            if getattr(resp, "message", None):
+                log.warning("join(%s) returned %s", room_id, resp.message)
         else:
             log.info("Ignoring invite to %s (inviter %r not allowlisted)", room_id, inviter)
 

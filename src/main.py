@@ -40,6 +40,7 @@ class Bot:
             health.cancel()
 
     async def tick(self) -> None:
+        await self.matrix.sweep_invited_rooms()
         for room_id in await self.matrix.joined_rooms():
             sessions = await self.matrix.active_rtc_sessions(room_id)
             # msc3401 member state can hold stale entries until their
