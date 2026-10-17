@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meeting-transcriber
+  labels:
+    app: meeting-transcriber
+spec:
+  # Single replica: this process joins MatrixRTC sessions and duplexes audio;
+  # a second replica would double-join and double-transcribe.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: meeting-transcriber
+  template:
+    metadata:
+      labels:
+        app: meeting-transcriber
+    spec:
+      containers:
+        - name: meeting-transcriber
+          image: ghcr.io/berget-ai/meeting-transcriber:0.0.0
+          env:
+            - name: HOMESERVER_URL
+              value: "https://matrix.berget.ai"
+            - name: MATRIX_USER_ID
+              value: "@transcriber:berget.ai"
+            - name: SFU_GET_URL
+              value: "https://matrix-rtc.berget.ai/sfu/get"
+            - name: REALTIME_URL
+              value: "wss://api.berget.ai/v1/realtime"
+            - name: TRANSCRIPTION_MODEL
+              value: "klang/pianissimo"
+          envFrom:
+            - secretRef:
+                name: meeting-transcriber-secrets
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10

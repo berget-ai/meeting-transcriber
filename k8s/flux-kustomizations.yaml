@@ -1,0 +1,36 @@
+---
+# FluxCD GitRepository + Kustomizations (template pattern). These are copied
+# verbatim into the infra repo (clusters/berget-internal/apps/meeting-transcriber/)
+# — see README.md "Deploy"/Runbook.
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: meeting-transcriber
+  namespace: flux-system
+spec:
+  interval: 60s
+  ref:
+    branch: main
+  timeout: 60s
+  # Public repo (same as tolk) — no secretRef deploy key needed.
+  url: https://github.com/berget-ai/meeting-transcriber.git
+
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: meeting-transcriber-production
+  namespace: flux-system
+spec:
+  interval: 5m
+  path: ./k8s/app/overlays/production
+  prune: true
+  sourceRef:
+    kind: GitRepository
+    name: meeting-transcriber
+  targetNamespace: meeting-transcriber
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: meeting-transcriber
+      namespace: meeting-transcriber
