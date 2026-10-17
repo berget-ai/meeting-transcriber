@@ -108,7 +108,7 @@ bao kv put secret/meeting-transcriber/app \
   MATRIX_ACCESS_TOKEN="mct_..." \
   BERGET_API_KEY="sk_ber_..."
 
-# appRole per berget-internal pattern (roleId goes into k8s/vault-secrets.yaml,
+# appRole per berget-internal pattern (roleId goes into k8s/vault-auth.yaml,
 # secretId is seeded here):
 bao write auth/approle/role/meeting-transcriber \
   token_policies=meeting-transcriber-secrets
@@ -117,7 +117,7 @@ bao policy write meeting-transcriber-secrets - <<EOF
 path "secret/data/meeting-transcriber/app" { capabilities = ["read"] }
 EOF
 
-# Fetch role id → replace REPLACE_WITH_ROLE_ID in k8s/vault-secrets.yaml:
+# Fetch role id → replace REPLACE_WITH_ROLE_ID in k8s/vault-auth.yaml:
 bao read auth/approle/role/meeting-transcriber/role-id
 
 # Seed the secretId secret on berget-internal:
@@ -135,7 +135,7 @@ so the secret can also be applied after the first Flux sync.)
 Copy `k8s/app/…` reference is already on GitHub via CI; infra-side files:
 - `clusters/berget-internal/apps/meeting-transcriber/GitRepository.yaml`
 - `clusters/berget-internal/apps/meeting-transcriber/flux-kustomization.yaml`
-- `clusters/berget-internal/apps/meeting-transcriber/vault-secrets.yaml` (with real roleId)
+- `clusters/berget-internal/apps/meeting-transcriber/vault-auth.yaml` (with real roleId)
 
 Point `./k8s/app/overlays/production` from this repo; `prune: true`.
 
