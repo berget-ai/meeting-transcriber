@@ -35,7 +35,7 @@ spec:
             # Device of the MAS compat session (whoami). Keys upload once and
             # persist in the PVC-backed nio store below.
             - name: MATRIX_DEVICE_ID
-              value: "KeoHTZZh8b"
+              value: "75EqDCDvww"
             - name: NIO_STORE_PATH
               value: "/data/nio-store"
             - name: SFU_GET_URL
