@@ -57,6 +57,22 @@ class Config:
     # End-of-call renskrivning (cleaned-up notes) via the LLM API.
     post_summary: bool = os.environ.get("POST_SUMMARY", "true").lower() != "false"
     summary_model: str = os.environ.get("SUMMARY_MODEL", "moonshotai/Kimi-K3")
+
+    # Tolk (LiveText) integration: push per-speaker turns + rolling meeting
+    # insights to a tolk session (https://github.com/berget-ai/tolk ingest
+    # API), so call participants get live captions + a live dashboard via a
+    # link posted in the meeting thread. Enabled when TOLK_INGEST_KEY is set
+    # (the shared key must match tolk's INGEST_API_KEY — a dedicated key,
+    # never BERGET_API_KEY).
+    tolk_ingest_key: str = os.environ.get("TOLK_INGEST_KEY", "")
+    tolk_base_url: str = os.environ.get("TOLK_BASE_URL", "https://tolk.berget.ai").rstrip("/")
+    tolk_source_lang: str = os.environ.get("TOLK_SOURCE_LANG", "sv")
+    tolk_insights_interval: int = int(os.environ.get("TOLK_INSIGHTS_INTERVAL_SECONDS", "30"))
+    tolk_insights_model: str = os.environ.get("TOLK_INSIGHTS_MODEL", "moonshotai/Kimi-K3")
+
+    @property
+    def tolk_enabled(self) -> bool:
+        return bool(self.tolk_ingest_key)
     # How often we check MatrixRTC rooms for active sessions (seconds).
     poll_interval: int = int(os.environ.get("POLL_INTERVAL", "15"))
     # Zombie-room watchdog: leave+rejoin when no LiveKit events AND no audio

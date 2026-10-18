@@ -20,6 +20,7 @@ from .config import config
 from .matrixing import Matrixing
 from .rtc import CallRoom, fetch_sfu_credentials
 from .summarize import summarize
+from .tolk import INSIGHT_CATEGORIES, TolkClient, extract_insights, format_insight
 from .transcribe import RealtimeSession
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,9 @@ class CallContext:
     call: Any | None = None
     # Set when the thread root exists — coalesces same-speaker utterances.
     poster: SegmentPoster | None = None
+    # Tolk (LiveText): per-call session client, created when TOLK_INGEST_KEY
+    # is set — gets every finalized turn + rolling insights upserts.
+    tolk: TolkClient | None = None
 
     def add(self, speaker: str, text: str) -> None:
         self.transcript.append(f"{speaker}: {text}")
@@ -168,6 +172,7 @@ class Bot:
         call = CallRoom(room_id)
         ctx = CallContext(room_id)
         track_tasks: dict[tuple[str, str], asyncio.Task] = {}
+        insights_task: asyncio.Task | None = None
         try:
             # Force a real leave→join transition BEFORE connecting: publishers
             # only Olm-encrypt their current media key when they see a member
@@ -193,6 +198,17 @@ class Bot:
                 )
                 ctx.thread_root = await self.matrix.post_message(room_id, banner)
                 ctx.poster = SegmentPoster(self.matrix, room_id, ctx.thread_root)
+            # Tolk (LiveText): en session per samtal — länken postas i tråden,
+            # segment och insikter pushas löpande. Kräver tråden för synlighet.
+            if self.cfg.tolk_enabled and ctx.thread_root is not None:
+                ctx.tolk = TolkClient(
+                    self.cfg.tolk_base_url,
+                    self.cfg.tolk_ingest_key,
+                    self.cfg.tolk_source_lang,
+                )
+                if url := await ctx.tolk.create_session():
+                    await self._post_tolk_link(ctx, url)
+                insights_task = asyncio.ensure_future(self._insights_loop(ctx))
 
             membership_refresh = time.time()
             empty_since: float | None = None
@@ -245,6 +261,9 @@ class Bot:
         except Exception:
             log.exception("[%s] call task failed", room_id)
         finally:
+            if insights_task is not None:
+                insights_task.cancel()
+                await asyncio.gather(insights_task, return_exceptions=True)
             for t in track_tasks.values():
                 t.cancel()
             if track_tasks:
@@ -260,6 +279,53 @@ class Bot:
             # Dedup-delay before allowing re-join on sticky sessions
             await asyncio.sleep(5)
             self.calls.pop(room_id, None)
+
+    async def _post_tolk_link(self, ctx: CallContext, url: str, updated: bool = False) -> None:
+        """Posts the tolk listen URL in the meeting thread (or its replacement
+        when the tolk pod restarted and the session had to be recreated)."""
+        if not self.cfg.post_to_room or ctx.thread_root is None:
+            return
+        prefix = "📡 Livetextning + insikter (ny länk)" if updated else "📡 Livetextning + insikter"
+        try:
+            await self.matrix.post_message(
+                ctx.room_id,
+                f"{prefix}: {url}",
+                html=f'{prefix}: <a href="{html.escape(url)}">{html.escape(url)}</a>',
+                thread_root=ctx.thread_root,
+            )
+        except Exception:
+            log.exception("[%s] tolk link post failed", ctx.room_id)
+
+    async def _insights_loop(self, ctx: CallContext) -> None:
+        """Every TOLK_INSIGHTS_INTERVAL_SECONDS: extract rolling structured
+        insights from the transcript so far and upsert them to tolk (one row
+        per category — the panel updates in place instead of stacking)."""
+        assert ctx.tolk is not None
+        last_transcript_len = 0
+        last_pushed: dict[str, str] = {}
+        while True:
+            await asyncio.sleep(self.cfg.tolk_insights_interval)
+            # Hoppa över orörda eller alldeles för tunna transkript.
+            if len(ctx.transcript) == last_transcript_len or len(ctx.transcript) < 3:
+                continue
+            last_transcript_len = len(ctx.transcript)
+            data = await extract_insights(
+                self.cfg.berget_api_base,
+                self.cfg.berget_api_key,
+                self.cfg.tolk_insights_model,
+                ctx.transcript,
+            )
+            for key, kind in INSIGHT_CATEGORIES:
+                items = data.get(key)
+                if not items:
+                    continue
+                text = format_insight(items)
+                if text == last_pushed.get(key):
+                    continue
+                new_url = await ctx.tolk.push_insight(kind, text, key)
+                if new_url:
+                    await self._post_tolk_link(ctx, new_url, updated=True)
+                last_pushed[key] = text
 
     async def _close_call(self, ctx: CallContext, duration_s: int) -> None:
         """Post end-of-call notes: LLM renskrivning, raw transcript fallback."""
@@ -318,6 +384,13 @@ class Bot:
                     await ctx.poster.add(sp, text)
                 except Exception:
                     log.exception("[%s] transcript post failed", ctx.room_id)
+            if ctx.tolk is not None:
+                try:
+                    new_url = await ctx.tolk.push_segment(sp, text)
+                    if new_url:
+                        await self._post_tolk_link(ctx, new_url, updated=True)
+                except Exception:
+                    log.exception("[%s] tolk segment push failed", ctx.room_id)
 
         session = RealtimeSession(self.cfg, speaker, on_text, on_audio=ctx.touch)
         try:
