@@ -13,7 +13,7 @@ import time
 
 from nio import AsyncClient, AsyncClientConfig, RoomMessageText
 from nio.crypto.olm_machine import Olm
-from nio.events.to_device import UnknownToDeviceEvent
+from nio.events.to_device import OlmEvent, UnknownToDeviceEvent
 from nio.exceptions import OlmUnverifiedDeviceError
 from nio.responses import RoomSendError
 
@@ -44,10 +44,45 @@ def _patch_olm_custom_events() -> None:
     Olm._handle_olm_event = patched
 
 
+def _patch_olm_debug_logging() -> None:
+    """DEBUG: log every incoming Olm event's sender + target curve keys vs our
+    current identity key. Answers the question 'which key do senders encrypt
+    to?' when decryption fails with 'doesn't contain ciphertext for our key'.
+    Also logs the type of every successfully decrypted to-device payload."""
+    original_decrypt_event = Olm.decrypt_event
+    original_handle = Olm._handle_olm_event
+
+    def patched_decrypt_event(self, event, room_id=None):
+        if isinstance(event, OlmEvent):
+            own = self.account.identity_keys["curve25519"]
+            targets = list(getattr(event, "ciphertext", {}).keys())
+            log.info(
+                "olm rx: sender=%s sender_key=%.8s targets=%s own=%.8s match=%s",
+                getattr(event, "sender", "?"),
+                getattr(event, "sender_key", "?"),
+                [f"{t:.8}" for t in targets],
+                own,
+                own in targets,
+            )
+        return original_decrypt_event(self, event, room_id)
+
+    def patched_handle(self, sender, sender_key, payload):
+        if payload.get("type") != CALL_KEYS_EVENT:
+            log.info(
+                "olm decrypted: type=%s sender=%s",
+                payload.get("type"), payload.get("sender", sender),
+            )
+        return original_handle(self, sender, sender_key, payload)
+
+    Olm.decrypt_event = patched_decrypt_event
+    Olm._handle_olm_event = patched_handle
+
+
 class Matrixing:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         _patch_olm_custom_events()
+        _patch_olm_debug_logging()
         # nio's peewee store does not create the parent dir itself.
         os.makedirs(cfg.store_path, exist_ok=True)
         pickle_key = cfg.pickle_key or cfg.access_token
